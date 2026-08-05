@@ -34,10 +34,6 @@ func User() web.MiddlewareFunc {
 			if err == nil {
 				token = cookie.Value
 			} else {
-				// The signup-transfer cookie is domain-wide, so it reaches every tenant
-				// subdomain. We do NOT promote it to a durable host-only auth cookie here:
-				// that only happens later, and only once we have confirmed the token's user
-				// actually belongs to the tenant selected by the current host.
 				token = webutil.GetSignUpAuthCookie(c)
 				fromSignUpCookie = token != ""
 			}
@@ -49,9 +45,6 @@ func User() web.MiddlewareFunc {
 					return next(c)
 				}
 
-				// Scope the lookup to the tenant selected by the request host. A globally
-				// valid user ID that belongs to a different tenant must resolve to "not
-				// found" so a token cannot be replayed across tenant boundaries.
 				tenantID := 0
 				if c.Tenant() != nil {
 					tenantID = c.Tenant().ID
@@ -67,19 +60,15 @@ func User() web.MiddlewareFunc {
 					return err
 				}
 
-				// Security stamp check: if the JWT contains a stamp (new tokens only),
-				// validate it against the current DB stamp. A mismatch means the user's
-				// security-relevant data has changed (e.g. role changed, account blocked,
-				// or OAuth allowed-roles updated) and they must re-authenticate so that
-				// access controls are re-evaluated.
+				// Security stamps are present only on tokens issued after the stamp fix.
+				// Legacy tokens remain valid; new tokens are invalidated when the stamp changes.
 				if claims.SecurityStamp != "" && user != nil && claims.SecurityStamp != user.SecurityStamp {
 					c.RemoveCookie(web.CookieAuthName)
 					if c.IsAjax() {
 						return c.JSON(401, web.Map{})
 					}
 					redirectTarget := c.Request.URL.RequestURI()
-					if redirectTarget != "" &&
-						redirectTarget != "/" &&
+					if redirectTarget != "" && redirectTarget != "/" &&
 						!strings.HasPrefix(redirectTarget, "/signin") &&
 						!strings.HasPrefix(redirectTarget, "/signout") {
 						return c.Redirect("/signin?redirect=" + url.QueryEscape(redirectTarget))
@@ -88,7 +77,7 @@ func User() web.MiddlewareFunc {
 				}
 			} else if c.Request.IsAPI() {
 				authHeader := c.Request.GetHeader("Authorization")
-				parts := strings.Split(authHeader, "Bearer")
+				parts := strings.SplitN(authHeader, "Bearer", 2)
 				if len(parts) == 2 {
 					apiKey := strings.TrimSpace(parts[1])
 					getUserByAPIKey := &query.GetUserByAPIKey{APIKey: apiKey}
@@ -100,7 +89,6 @@ func User() web.MiddlewareFunc {
 						return err
 					}
 					user = getUserByAPIKey.Result
-
 					if !user.IsCollaborator() {
 						return c.HandleValidation(validate.Failed("API Key is invalid"))
 					}
@@ -127,20 +115,13 @@ func User() web.MiddlewareFunc {
 			}
 
 			if user != nil && c.Tenant() != nil && user.Tenant.ID == c.Tenant().ID {
-				// blocked users are unable to sign in
 				if user.Status == enum.UserBlocked {
 					c.RemoveCookie(web.CookieAuthName)
 					return c.Unauthorized()
 				}
-
-				// Only now that the user is confirmed to belong to the current tenant do we
-				// promote a signup-transfer cookie into a durable host-only auth cookie.
-				// This is deliberately skipped on any other tenant, so the domain-wide
-				// signup token cannot become a normal session on an unrelated subdomain.
 				if fromSignUpCookie {
 					webutil.AddAuthTokenCookie(c, token)
 				}
-
 				c.SetUser(user)
 			}
 
