@@ -71,7 +71,6 @@ func routes(r *web.Engine) *web.Engine {
 
 	r.Get("/privacy", handlers.LegalPage("Privacy Policy", "privacy.md"))
 
-	// Stripe webhooks (before CSRF middleware)
 	stripeWh := r.Group()
 	{
 		stripeWh.Post("/webhooks/stripe", webhooks.IncomingStripeWebhook())
@@ -87,7 +86,6 @@ func routes(r *web.Engine) *web.Engine {
 	r.Get("/oauth/:provider", handlers.SignInByOAuth())
 	r.Get("/oauth/:provider/callback", handlers.OAuthCallback())
 
-	// Starting from this step, a Tenant is required
 	r.Use(middlewares.RequireTenant())
 
 	r.Get("/sitemap.xml", handlers.Sitemap())
@@ -113,9 +111,8 @@ func routes(r *web.Engine) *web.Engine {
 	r.Get("/oauth/:provider/token", handlers.OAuthToken())
 	r.Get("/oauth/:provider/echo", handlers.OAuthEcho())
 
-	// If tenant is pending, block it from using any other route
-	r.Use(middlewares.BlockPendingTenants())
-
+	// Keep authentication endpoints outside pending-tenant blocking. A pending tenant
+	// must still be able to complete login and establish a valid authentication cookie.
 	r.Get("/signin", handlers.SignInPage())
 	r.Get("/signin/complete", handlers.CompleteSignInProfilePage())
 	r.Get("/loginemailsent", handlers.LoginEmailSentPage())
@@ -129,13 +126,15 @@ func routes(r *web.Engine) *web.Engine {
 	r.Post("/_api/signin/verify", handlers.VerifySignInCode())
 	r.Post("/_api/signin/resend", handlers.ResendSignInCode())
 
-	// Cancel a scheduled site deletion. Authorised by the unguessable key in the emailed link
-	// alone, so it must stay reachable without authentication (it only restores access).
 	if !env.IsSingleHostMode() {
 		r.Get("/admin/danger-zone/cancel", handlers.CancelTenantDeletion())
 	}
 
-	// Block if it's private tenant with unauthenticated user
+	// Pending tenants are blocked only after authentication routes have been
+	// registered, so the security restriction remains in place for application
+	// routes without preventing login.
+	r.Use(middlewares.BlockPendingTenants())
+
 	r.Use(middlewares.CheckTenantPrivacy())
 
 	r.Get("/", handlers.Index())
@@ -145,15 +144,12 @@ func routes(r *web.Engine) *web.Engine {
 
 	ui := r.Group()
 	{
-		// From this step, a User is required
 		ui.Use(middlewares.IsAuthenticated())
-
 		ui.Get("/settings", handlers.UserSettings())
 		ui.Get("/notifications", handlers.Notifications())
 		ui.Get("/notifications/:id", handlers.ReadNotification())
 		ui.Get("/_api/notifications/unread", handlers.GetAllNotifications())
 		ui.Get("/change-email/verify", handlers.VerifyChangeEmailKey())
-
 		ui.Delete("/_api/user", handlers.DeleteUser())
 		ui.Post("/_api/user/regenerate-apikey", handlers.RegenerateAPIKey())
 		ui.Post("/_api/user/settings", handlers.UpdateUserSettings())
@@ -161,13 +157,8 @@ func routes(r *web.Engine) *web.Engine {
 		ui.Post("/_api/notifications/read-all", handlers.ReadAllNotifications())
 		ui.Get("/_api/notifications/unread/total", handlers.TotalUnreadNotifications())
 
-		// From this step, only Collaborators and Administrators are allowed
 		ui.Use(middlewares.IsAuthorized(enum.RoleCollaborator, enum.RoleAdministrator))
-
-		// locale is forced to English for administrative pages.
-		// This is meant to be removed when all pages are translated.
 		ui.Use(middlewares.SetLocale("en"))
-
 		ui.Get("/admin", handlers.GeneralSettingsPage())
 		ui.Get("/admin/advanced", handlers.AdvancedSettingsPage())
 		ui.Get("/admin/privacy", handlers.Page("Privacy · Site Settings", "", "Administration/pages/PrivacySettings.page"))
@@ -177,24 +168,18 @@ func routes(r *web.Engine) *web.Engine {
 		ui.Get("/admin/authentication", handlers.ManageAuthentication())
 		ui.Get("/_api/admin/oauth/:provider", handlers.GetOAuthConfig())
 
-		// Pro features (available to self-hosters and pro hosted customers)
 		proUi := ui.Group()
 		{
 			proUi.Use(middlewares.RequirePro())
 			proUi.Get("/admin/moderation", handlers.ModerationPage())
 		}
 
-		// From this step, only Administrators are allowed
 		ui.Use(middlewares.IsAuthorized(enum.RoleAdministrator))
-
-		// Danger Zone — delete the entire site. Hosted multi-tenant only; owner-only is
-		// enforced inside the handlers.
 		if !env.IsSingleHostMode() {
 			ui.Get("/admin/danger-zone", handlers.DangerZonePage())
 			ui.Delete("/_api/admin/tenant", handlers.RequestTenantDeletion())
 			ui.Post("/_api/admin/tenant/cancel-deletion", handlers.CancelTenantDeletionByOwner())
 		}
-
 		ui.Get("/admin/export", handlers.Page("Export · Site Settings", "", "Administration/pages/Export.page"))
 		ui.Get("/admin/export/posts.csv", handlers.ExportPostsToCSV())
 		ui.Get("/admin/export/backup.zip", handlers.ExportBackupZip())
@@ -219,7 +204,6 @@ func routes(r *web.Engine) *web.Engine {
 		ui.Put("/_api/admin/users/:userID/trust", handlers.TrustUser())
 		ui.Delete("/_api/admin/users/:userID/trust", handlers.UntrustUser())
 
-		// Pro features (available to self-hosters and pro hosted customers)
 		proAdmin := ui.Group()
 		{
 			proAdmin.Use(middlewares.RequirePro())
@@ -235,8 +219,6 @@ func routes(r *web.Engine) *web.Engine {
 		}
 	}
 
-	// Public operations
-	// Does not require authentication
 	publicApi := r.Group()
 	{
 		publicApi.Get("/api/v1/similarposts", apiv1.FindSimilarPosts())
@@ -249,13 +231,10 @@ func routes(r *web.Engine) *web.Engine {
 		publicApi.Get("/api/v1/posts/:number/votes", apiv1.ListVotes())
 	}
 
-	// Operations used to manage the content of a site
-	// Available to any authenticated user
 	membersApi := r.Group()
 	{
 		membersApi.Use(middlewares.IsAuthenticated())
 		membersApi.Use(middlewares.BlockLockedTenants())
-
 		membersApi.Post("/api/v1/posts", apiv1.CreatePost())
 		membersApi.Put("/api/v1/posts/:number", apiv1.UpdatePost())
 		membersApi.Post("/api/v1/posts/:number/comments/:id/reactions/:reaction", apiv1.ToggleReaction())
@@ -267,42 +246,32 @@ func routes(r *web.Engine) *web.Engine {
 		membersApi.Post("/api/v1/posts/:number/votes/toggle", apiv1.ToggleVote())
 		membersApi.Post("/api/v1/posts/:number/subscription", apiv1.Subscribe())
 		membersApi.Delete("/api/v1/posts/:number/subscription", apiv1.Unsubscribe())
-
 		membersApi.Use(middlewares.IsAuthorized(enum.RoleCollaborator, enum.RoleAdministrator))
 		membersApi.Put("/api/v1/posts/:number/status", apiv1.SetResponse())
 	}
 
-	// Operations used to manage a site
-	// Available to both collaborators and administrators
 	staffApi := r.Group()
 	{
 		staffApi.Use(middlewares.SetLocale("en"))
 		staffApi.Use(middlewares.IsAuthenticated())
 		staffApi.Use(middlewares.IsAuthorized(enum.RoleCollaborator, enum.RoleAdministrator))
-
 		staffApi.Get("/api/v1/users", apiv1.ListUsers())
 		staffApi.Post("/api/v1/invitations/send", apiv1.SendInvites())
 		staffApi.Post("/api/v1/invitations/sample", apiv1.SendSampleInvite())
-
 		staffApi.Use(middlewares.BlockLockedTenants())
 		staffApi.Post("/api/v1/posts/:number/tags/:slug", apiv1.AssignTag())
 		staffApi.Delete("/api/v1/posts/:number/tags/:slug", apiv1.UnassignTag())
 	}
 
-	// Operations used to manage a site
-	// Only available to administrators
 	adminApi := r.Group()
 	{
 		adminApi.Use(middlewares.SetLocale("en"))
 		adminApi.Use(middlewares.IsAuthenticated())
 		adminApi.Use(middlewares.IsAuthorized(enum.RoleAdministrator))
-
 		adminApi.Post("/api/v1/users", apiv1.CreateUser())
 		adminApi.Post("/api/v1/tags", apiv1.CreateEditTag())
 		adminApi.Put("/api/v1/tags/:slug", apiv1.CreateEditTag())
 		adminApi.Delete("/api/v1/tags/:slug", apiv1.DeleteTag())
-
-		// Pro features (available to self-hosters and pro hosted customers)
 		proAdminApi := adminApi.Group()
 		{
 			proAdminApi.Use(middlewares.RequirePro())
@@ -315,7 +284,6 @@ func routes(r *web.Engine) *web.Engine {
 			proAdminApi.Post("/api/v1/admin/moderation/comments/:id/approve", apiv1.ApproveComment())
 			proAdminApi.Post("/api/v1/admin/moderation/comments/:id/decline", apiv1.DeclineComment())
 		}
-
 		adminApi.Use(middlewares.BlockLockedTenants())
 		adminApi.Delete("/api/v1/posts/:number", apiv1.DeletePost())
 	}
