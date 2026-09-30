@@ -39,14 +39,16 @@ func MultiImageUpload(ctx context.Context, currentAttachments []string, uploads 
 	totalCount := len(currentAttachments)
 
 	for _, upload := range uploads {
-		if upload.Remove {
-			for _, attachment := range currentAttachments {
-				if attachment == upload.BlobKey {
-					totalCount--
+		if upload != nil {
+			if upload.Remove {
+				for _, attachment := range currentAttachments {
+					if attachment == upload.BlobKey {
+						totalCount--
+					}
 				}
+			} else if upload.Upload != nil {
+				totalCount++
 			}
-		} else if upload.Upload != nil {
-			totalCount++
 		}
 
 		messages, err := ImageUpload(ctx, upload, ImageUploadOpts{
