@@ -39,13 +39,13 @@ func MultiImageUpload(ctx context.Context, currentAttachments []string, uploads 
 	totalCount := len(currentAttachments)
 
 	for _, upload := range uploads {
-		if upload.Remove {
+		if upload != nil && upload.Remove {
 			for _, attachment := range currentAttachments {
 				if attachment == upload.BlobKey {
 					totalCount--
 				}
 			}
-		} else if upload.Upload != nil {
+		} else if upload != nil && upload.Upload != nil {
 			totalCount++
 		}
 
